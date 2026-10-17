@@ -1,0 +1,46 @@
+.settings-page { color: #edf2ed; }
+.settings-page .page-title { color: #20292d; }
+.settings-page .page-description { color: #727e82; }
+.settings-simulation-note { display: flex; align-items: center; gap: 9px; margin: 20px 0 13px; padding: 11px 13px; color: #48603c; background: #f0f5e9; border: 1px solid #dce8cc; border-radius: 9px; font-size: 10px; }
+.settings-simulation-note svg { flex: 0 0 auto; color: #708f43; }
+.settings-form { display: grid; gap: 12px; }
+.settings-card { min-width: 0; padding: 18px; background: #fff; border: 1px solid #e5e9e3; border-radius: 12px; box-shadow: 0 3px 11px rgb(26 39 31 / 3%); }
+.settings-card-heading { display: flex; align-items: center; gap: 11px; margin-bottom: 16px; }
+.settings-card-heading > span { display: grid; width: 32px; height: 32px; flex: 0 0 32px; place-items: center; color: #70883e; background: #f0f5e6; border-radius: 8px; }
+.settings-card-heading h2 { margin: 0; color: #24302d; font-size: 13px; }
+.settings-card-heading p { margin: 5px 0 0; color: #85908e; font-size: 9px; line-height: 1.45; }
+.settings-fields { display: grid; gap: 13px; }
+.settings-fields.two-col { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.settings-fields > label { display: grid; align-content: start; gap: 6px; color: #697572; font-size: 9px; font-weight: 650; }
+.settings-fields input:not([type="checkbox"]),
+.settings-fields select { width: 100%; min-height: 36px; padding: 0 10px; color: #293431; background: #fbfcfa; border: 1px solid #dce2dc; border-radius: 7px; font: inherit; font-size: 10px; }
+.settings-fields input:focus,
+.settings-fields select:focus { border-color: #9daa89; outline: 2px solid rgb(190 224 88 / 22%); }
+.settings-readonly-setting { display: grid; align-content: start; gap: 5px; min-height: 62px; padding: 9px 10px; background: #f7f8f5; border: 1px solid #e3e8e2; border-radius: 7px; }
+.settings-readonly-setting span { color: #798581; font-size: 9px; }
+.settings-readonly-setting strong { color: #293431; font-size: 11px; }
+.settings-readonly-setting small { color: #99a19e; font-size: 8px; }
+.settings-formula-note { margin: 12px 0 0; color: #87918d; font-size: 9px; line-height: 1.55; }
+.settings-toggle-list { display: grid; }
+.preference-toggle { position: relative; display: flex; min-height: 58px; align-items: center; justify-content: space-between; gap: 14px; padding: 8px 1px; border-top: 1px solid #edf0eb; cursor: pointer; }
+.preference-toggle:first-child { border-top: 0; }
+.preference-toggle > span { display: grid; gap: 4px; }
+.preference-toggle strong { color: #33403b; font-size: 10px; }
+.preference-toggle small { color: #88928e; font-size: 9px; }
+.preference-toggle input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+.preference-toggle i { position: relative; width: 34px; height: 19px; flex: 0 0 34px; background: #d5dbd4; border: 1px solid #c3cbc2; border-radius: 999px; transition: background-color 140ms ease; }
+.preference-toggle i::after { position: absolute; top: 2px; left: 2px; width: 13px; height: 13px; content: ""; background: #fff; border-radius: 50%; box-shadow: 0 1px 2px rgb(0 0 0 / 18%); transition: transform 140ms ease; }
+.preference-toggle input:checked + i { background: #8da75d; border-color: #8da75d; }
+.preference-toggle input:checked + i::after { transform: translateX(15px); }
+.preference-toggle input:focus-visible + i { outline: 3px solid rgb(139 169 78 / 45%); outline-offset: 3px; }
+.settings-about-card > p { max-width: 780px; margin: 0 0 10px; color: #687470; font-size: 10px; line-height: 1.6; }
+.settings-about-card > small { color: #8b9591; font-size: 9px; }
+.settings-save-message { margin: 0; color: #55723a; font-size: 10px; }
+.settings-actions { display: flex; justify-content: flex-end; gap: 9px; padding-bottom: 10px; }
+.settings-reset-button,
+.settings-save-button { display: inline-flex; min-height: 36px; align-items: center; justify-content: center; gap: 7px; padding: 0 12px; border-radius: 8px; cursor: pointer; font: inherit; font-size: 10px; font-weight: 650; }
+.settings-reset-button { color: #67726e; background: #fff; border: 1px solid #dce2dc; }
+.settings-reset-button:hover { background: #f3f5f1; }
+.settings-save-button { color: #18221b; background: #c4e16b; border: 1px solid #c4e16b; }
+.settings-save-button:hover { background: #d2eb82; }
+@media (max-width: 600px) { .settings-fields.two-col { grid-template-columns: 1fr; } .settings-card { padding: 14px; } .settings-actions { justify-content: stretch; } .settings-actions button { flex: 1; } }

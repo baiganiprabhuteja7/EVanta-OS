@@ -1,0 +1,42 @@
+.station-detail-page {
+  --station-detail-bg: #111820;
+  --station-detail-surface: #18232c;
+  --station-detail-border: #2b3942;
+  min-height: calc(100vh - var(--topbar-height));
+  margin: -47px -42px -64px;
+  padding: 31px 42px 58px;
+  color: #edf2ed;
+  background: var(--station-detail-bg);
+}
+.station-detail-back { display: inline-flex; align-items: center; gap: 7px; margin-bottom: 19px; color: #aabbad; font-size: 10px; text-decoration: none; }
+.station-detail-back:hover { color: #c4e16b; }
+.station-detail-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.station-detail-page .page-header { margin: 0; }
+.station-detail-page .page-title { color: #f0f4ee; }
+.station-detail-page .page-description { color: #9aa6aa; }
+.station-detail-overview { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 11px; margin-top: 22px; }
+.station-detail-overview article { display: grid; min-height: 90px; align-content: center; gap: 9px; padding: 14px; background: var(--station-detail-surface); border: 1px solid var(--station-detail-border); border-radius: 10px; }
+.station-detail-overview article > span { display: inline-flex; align-items: center; gap: 6px; color: #92a0a2; font-size: 9px; }
+.station-detail-overview article > span svg { color: #a8bd75; }
+.station-detail-overview article > strong { color: #e9f0eb; font-size: 13px; font-weight: 600; }
+.station-detail-chart-card { margin-top: 14px; padding: 18px 17px 10px; background: var(--station-detail-surface); border: 1px solid var(--station-detail-border); border-radius: 12px; }
+.station-detail-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-bottom: 10px; }
+.station-detail-section-heading h2 { margin: 0; color: #e7eee8; font-size: 14px; }
+.station-detail-section-heading p { margin: 5px 0 0; color: #8e9da1; font-size: 9px; }
+.station-detail-section-heading > span { color: #a8bd75; font-size: 8px; font-weight: 700; letter-spacing: .1em; }
+.station-detail-table-scroll { overflow-x: auto; contain: paint; }
+.station-detail-inventory table { width: 100%; border-collapse: collapse; text-align: left; }
+.station-detail-inventory th { padding: 10px; color: #97a4a7; background: #1b2831; border-block: 1px solid #2b3942; font-size: 9px; white-space: nowrap; }
+.station-detail-inventory td { padding: 10px; color: #c0c9c9; border-bottom: 1px solid #28363e; font-size: 9px; white-space: nowrap; }
+.station-detail-charger-status { font-size: 9px; font-weight: 650; }
+.station-detail-charger-status.status-charging { color: #a7c8eb; }
+.station-detail-charger-status.status-available { color: #a9d4b1; }
+.station-detail-charger-status.status-offline { color: #bac3c4; }
+.station-detail-charger-status.status-faulted { color: #e4a99a; }
+.station-detail-empty { display: grid; min-height: 110px; place-items: center; color: #8e9da1; font-size: 11px; }
+.station-detail-disclaimer { margin: 12px 2px 0; color: #829197; font-size: 9px; }
+@media (max-width: 1020px) { .station-detail-page { margin-inline: -28px; padding-inline: 28px; } }
+@media (min-width: 761px) and (max-width: 900px) { .station-detail-page { margin-inline: -20px; padding-inline: 20px; } }
+@media (max-width: 760px) { .station-detail-page { min-height: calc(100vh - 64px); margin: -35px -20px -48px; padding: 27px 20px 48px; } }
+@media (max-width: 560px) { .station-detail-overview { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; } }
+@media (max-width: 380px) { .station-detail-overview { grid-template-columns: 1fr; } .station-detail-heading { align-items: flex-start; flex-direction: column; } }
