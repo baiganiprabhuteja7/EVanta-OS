@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # EVanta OS
 
 EVanta OS is an EV charging intelligence and business management platform.
@@ -54,3 +55,6 @@ Other routes currently render a shared page header and placeholder content.
 npm run build
 npm run lint
 ```
+=======
+# EVanta-OS
+>>>>>>> 95c19d145a72f59a02af92425b0548cc9ba30009
