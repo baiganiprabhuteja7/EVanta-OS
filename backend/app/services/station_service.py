@@ -1,210 +1,249 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from typing import List, Optional, Tuple
+from typing import List, Optional
 from fastapi import HTTPException, status
-from sqlalchemy import func, or_, select
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session
 
+from app.core.config import settings
+from app.db.seed import seed_database
+from app.models.alert import Alert
 from app.models.charger import Charger
 from app.models.charging_session import ChargingSession
+from app.models.maintenance import MaintenanceRecord
+from app.models.meter_reading import MeterReading
+from app.models.setting import StationSetting
 from app.models.station import Station
-from app.models.user import User
-from app.schemas.station import StationCreate, StationResponse, StationUpdate
-
-CHARGER_PROFILES = [
-    {"type": "AC", "connector": "Type 2", "power": 7.4, "voltage": 230.0, "current": 32.0},
-    {"type": "AC", "connector": "Type 2", "power": 22.0, "voltage": 400.0, "current": 34.0},
-    {"type": "DC", "connector": "CCS2", "power": 60.0, "voltage": 500.0, "current": 120.0},
-    {"type": "DC", "connector": "CCS2", "power": 120.0, "voltage": 650.0, "current": 185.0},
-    {"type": "DC", "connector": "CHAdeMO", "power": 50.0, "voltage": 400.0, "current": 125.0},
-]
+from app.models.station_expense import StationExpense
+from app.schemas.station import StationCreate, StationUpdate
 
 
 class StationService:
     @staticmethod
-    def _enrich_station(station: Station, db: Session) -> dict:
-        """Calculate live aggregated metrics for a station."""
-        chargers = db.scalars(select(Charger).where(Charger.station_id == station.id)).all()
-        total_chargers = len(chargers)
-        active_chargers = sum(1 for c in chargers if c.status.lower() == "charging")
-
-        # Sum energy delivered and today's revenue from charging sessions
-        charger_ids = [c.id for c in chargers]
-        energy_delivered = 0.0
-        todays_revenue = 0.0
-
-        if charger_ids:
-            now = datetime.now(timezone.utc)
-            start_of_day = datetime(now.year, now.month, now.day, tzinfo=timezone.utc)
-
-            energy_sum = db.scalar(
-                select(func.sum(ChargingSession.energy_delivered_kwh)).where(
-                    ChargingSession.charger_id.in_(charger_ids)
+    def get_prabhus_grid_station(db: Session) -> Station:
+        """Retrieves Prabhu's Grid default station record."""
+        station = db.scalar(select(Station).where(Station.station_code == settings.STATION_CODE))
+        if not station:
+            seed_database(force_reset=False)
+            station = db.scalar(select(Station).where(Station.station_code == settings.STATION_CODE))
+            if not station:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Default station record could not be initialized.",
                 )
-            )
-            if energy_sum:
-                energy_delivered = float(energy_sum)
+        return station
 
-            rev_sum = db.scalar(
-                select(func.sum(ChargingSession.total_amount)).where(
-                    ChargingSession.charger_id.in_(charger_ids),
-                    ChargingSession.start_time >= start_of_day,
-                )
-            )
-            if rev_sum:
-                todays_revenue = float(rev_sum)
+    @staticmethod
+    def get_station_by_id_or_code(db: Session, identifier: str) -> Optional[Station]:
+        if str(identifier).isdigit():
+            station = db.scalar(select(Station).where(Station.id == int(identifier)))
+            if station:
+                return station
+        return db.scalar(select(Station).where(Station.station_code == identifier))
 
-        utilization = 0
-        if total_chargers > 0:
-            utilization = round((active_chargers / total_chargers) * 100)
-            if station.status.lower() != "online" and active_chargers == 0:
-                utilization = 0
+    @staticmethod
+    def compute_station_metrics(station: Station, db: Session) -> dict:
+        chargers = db.scalars(
+            select(Charger).where(Charger.station_id == station.id).order_by(Charger.charger_code)
+        ).all()
+        setting = db.scalar(select(StationSetting).where(StationSetting.station_id == station.id))
 
-        location_str = ""
-        if station.city and station.state:
-            location_str = f"{station.city}, {station.state}"
-        elif station.city:
-            location_str = station.city
-        elif station.address:
-            location_str = station.address
+        tariff = float(setting.tariff_per_kwh) if setting else settings.DEFAULT_TARIFF
+        elec_rate = float(setting.electricity_cost_per_kwh) if setting else 8.5
+        address = setting.station_address if setting and setting.station_address else (station.address or settings.DEFAULT_ADDRESS)
+
+        # 1. Capacity & instantaneous power
+        installed_capacity_kw = sum(float(c.rated_power_kw) for c in chargers)
+        current_charging_power_kw = 0.0
+        active_chargers = 0
+        available_chargers = 0
+        faulted_chargers = 0
+        offline_chargers = 0
+
+        for c in chargers:
+            st = c.status.lower()
+            if st == "charging":
+                active_chargers += 1
+                if c.charger_type == "DC":
+                    calc_kw = (float(c.voltage or 500) * float(c.current_amp or 0)) / 1000.0
+                else:
+                    calc_kw = (float(c.voltage or 230) * float(c.current_amp or 0) * float(c.power_factor or 0.94)) / 1000.0
+                power_kw = min(float(c.rated_power_kw), max(0.0, calc_kw))
+                current_charging_power_kw += power_kw
+            elif st == "available":
+                available_chargers += 1
+            elif st == "faulted":
+                faulted_chargers += 1
+            else:
+                offline_chargers += 1
+
+        current_charging_power_kw = round(current_charging_power_kw, 2)
+
+        # 2. Sessions & Energy delivered
+        now = datetime.now(timezone.utc)
+        today_start = datetime(now.year, now.month, now.day, tzinfo=timezone.utc)
+        month_start = datetime(now.year, now.month, 1, tzinfo=timezone.utc)
+
+        all_sessions = db.scalars(
+            select(ChargingSession)
+            .join(Charger, ChargingSession.charger_id == Charger.id)
+            .where(Charger.station_id == station.id)
+        ).all()
+
+        total_energy_kwh = sum(float(s.energy_delivered_kwh) for s in all_sessions)
+        energy_today_kwh = sum(float(s.energy_delivered_kwh) for s in all_sessions if s.start_time >= today_start)
+        energy_month_kwh = sum(float(s.energy_delivered_kwh) for s in all_sessions if s.start_time >= month_start)
+
+        ongoing_sessions = [s for s in all_sessions if s.status.lower() == "ongoing"]
+        ongoing_count = len(ongoing_sessions)
+
+        # 3. Utilization rate
+        operational_chargers = len(chargers) - faulted_chargers - offline_chargers
+        utilization_rate = (
+            round((active_chargers / operational_chargers) * 100.0, 1)
+            if operational_chargers > 0
+            else 0.0
+        )
+
+        # 4. Financial Calculations based on real definitions:
+        # Charging revenue = Energy delivered × Applicable charging tariff (or sum of recorded total_amount)
+        total_charging_revenue = round(
+            sum(float(s.total_amount) if float(s.total_amount) > 0 else (float(s.energy_delivered_kwh) * float(s.unit_price or tariff)) for s in all_sessions),
+            2
+        )
+        estimated_today_cost = round(energy_today_kwh * tariff, 2)
+
+        # Electricity expense = Energy consumed × Applicable electricity rate
+        total_electricity_expense = round(total_energy_kwh * elec_rate, 2)
+
+        # Other operating expenses = recorded expenses in station_expenses + maintenance costs
+        recorded_expenses = db.scalars(
+            select(StationExpense).where(StationExpense.station_id == station.id)
+        ).all()
+        maint_costs = db.scalars(
+            select(MaintenanceRecord).where(MaintenanceRecord.station_id == station.id)
+        ).all()
+
+        other_operating_expenses = round(
+            sum(float(e.amount) for e in recorded_expenses) + sum(float(m.cost) for m in maint_costs) + float(station.monthly_fixed_cost or 18000.0),
+            2
+        )
+
+        # Operating profit = Charging revenue − Electricity expense − Other operating expenses
+        operating_profit = round(total_charging_revenue - total_electricity_expense - other_operating_expenses, 2)
+
+        # ROI % = (Operating profit / Recorded Investment) * 100
+        initial_inv = float(station.initial_investment or 2500000.0)
+        roi_percentage = round((operating_profit / initial_inv) * 100.0, 2) if initial_inv > 0 else 0.0
 
         return {
             "id": station.id,
             "station_code": station.station_code,
             "station_name": station.station_name,
-            "description": station.description,
-            "address": station.address,
+            "owner_name": station.owner_name,
             "city": station.city,
             "state": station.state,
-            "postal_code": station.postal_code,
-            "latitude": float(station.latitude) if station.latitude is not None else None,
-            "longitude": float(station.longitude) if station.longitude is not None else None,
+            "country": station.country,
+            "address": address,
             "status": station.status,
-            "created_by": station.created_by,
+            "initial_investment": initial_inv,
+            "monthly_fixed_cost": float(station.monthly_fixed_cost or 18000.0),
+            "data_source": settings.DATA_SOURCE_LABEL,
+            "disclaimer": "DEMO MODE — SIMULATED DATA — NOT LIVE STATION TELEMETRY",
             "created_at": station.created_at,
             "updated_at": station.updated_at,
-            "location": location_str,
-            "chargers": total_chargers,
+            "installed_capacity_kw": round(installed_capacity_kw, 1),
+            "current_charging_power_kw": current_charging_power_kw,
+            "energy_today_kwh": round(energy_today_kwh, 1),
+            "energy_month_kwh": round(energy_month_kwh, 1),
+            "total_energy_kwh": round(total_energy_kwh, 1),
+            "active_sessions_count": ongoing_count,
+            "total_chargers": len(chargers),
             "active_chargers": active_chargers,
-            "energy_delivered": energy_delivered,
-            "todays_revenue": todays_revenue,
-            "utilization": utilization,
+            "available_chargers": available_chargers,
+            "faulted_chargers": faulted_chargers,
+            "offline_chargers": offline_chargers,
+            "utilization_rate": utilization_rate,
+            "tariff_per_kwh": tariff,
+            "electricity_cost_per_kwh": elec_rate,
+            "estimated_today_cost": estimated_today_cost,
+            "total_revenue": total_charging_revenue,
+            "total_electricity_expense": total_electricity_expense,
+            "total_operating_expenses": other_operating_expenses,
+            "operating_profit": operating_profit,
+            "roi_percentage": roi_percentage,
         }
 
     @staticmethod
-    def get_stations(
-        db: Session,
-        search: Optional[str] = None,
-        status_filter: Optional[str] = None,
-        sort_by: str = "name",
-        direction: str = "asc",
-        skip: int = 0,
-        limit: int = 100,
-    ) -> List[dict]:
-        query = select(Station)
+    def get_all_stations(db: Session) -> List[dict]:
+        stations = db.scalars(select(Station).order_by(Station.id.asc())).all()
+        if not stations:
+            default_st = StationService.get_prabhus_grid_station(db)
+            stations = [default_st]
+        return [StationService.compute_station_metrics(st, db) for st in stations]
 
-        if search:
-            search_term = f"%{search.strip()}%"
-            query = query.where(
-                or_(
-                    Station.station_name.ilike(search_term),
-                    Station.station_code.ilike(search_term),
-                    Station.city.ilike(search_term),
-                    Station.state.ilike(search_term),
-                    Station.address.ilike(search_term),
+    @staticmethod
+    def get_station_summary(db: Session, station_id_or_code: Optional[str] = None) -> dict:
+        if station_id_or_code:
+            st = StationService.get_station_by_id_or_code(db, station_id_or_code)
+            if not st:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Station '{station_id_or_code}' not found.",
                 )
-            )
-
-        if status_filter and status_filter != "All statuses":
-            query = query.where(Station.status.ilike(status_filter))
-
-        stations = db.scalars(query).all()
-        enriched = [StationService._enrich_station(s, db) for s in stations]
-
-        # In-memory sorting for computed properties
-        reverse = direction.lower() == "desc"
-        if sort_by == "energyDelivered" or sort_by == "energy_delivered":
-            enriched.sort(key=lambda s: s["energy_delivered"], reverse=reverse)
-        elif sort_by == "todaysRevenue" or sort_by == "todays_revenue":
-            enriched.sort(key=lambda s: s["todays_revenue"], reverse=reverse)
-        elif sort_by == "utilization":
-            enriched.sort(key=lambda s: s["utilization"], reverse=reverse)
-        else:
-            enriched.sort(key=lambda s: s["station_name"].lower(), reverse=reverse)
-
-        return enriched[skip : skip + limit]
+            return StationService.compute_station_metrics(st, db)
+        station = StationService.get_prabhus_grid_station(db)
+        return StationService.compute_station_metrics(station, db)
 
     @staticmethod
-    def get_station_by_id_or_code(db: Session, identifier: str) -> Optional[Station]:
-        if identifier.isdigit():
-            station = db.scalar(select(Station).where(Station.id == int(identifier)))
-            if station:
-                return station
-        return db.scalar(select(Station).where(Station.station_code == identifier.strip()))
-
-    @staticmethod
-    def create_station(
-        db: Session, data: StationCreate, current_user: Optional[User] = None
-    ) -> dict:
-        code = data.station_code.strip().upper()
-        existing = db.scalar(select(Station).where(Station.station_code == code))
+    def create_station(db: Session, data: StationCreate, user_id: Optional[int] = None) -> dict:
+        existing = db.scalar(select(Station).where(Station.station_code == data.station_code.strip()))
         if existing:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"A station with code '{code}' already exists.",
+                detail=f"Station code '{data.station_code}' already exists.",
             )
 
-        city = data.city
-        state = data.state
-        if not city and data.address and "," in data.address:
-            parts = [p.strip() for p in data.address.split(",")]
-            if len(parts) >= 2:
-                city = parts[-2]
-                state = parts[-1]
-
-        station = Station(
-            station_code=code,
+        new_station = Station(
+            station_code=data.station_code.strip().upper(),
             station_name=data.station_name.strip(),
+            owner_name=data.owner_name.strip(),
             description=data.description,
             address=data.address,
-            city=city,
-            state=state,
+            city=data.city,
+            state=data.state,
+            country=data.country,
             postal_code=data.postal_code,
             latitude=data.latitude,
             longitude=data.longitude,
-            status=data.status or "Online",
-            created_by=current_user.id if current_user else None,
+            status=data.status,
+            initial_investment=data.initial_investment,
+            monthly_fixed_cost=data.monthly_fixed_cost,
+            created_by=user_id,
         )
-        db.add(station)
-        db.flush()
-
-        # Generate initial chargers if requested
-        chargers_to_add = data.chargers_count or 0
-        prefix = code.replace("EV-", "CH-")
-        for i in range(1, chargers_to_add + 1):
-            profile = CHARGER_PROFILES[(i - 1 + len(code)) % len(CHARGER_PROFILES)]
-            status_val = "Available" if station.status == "Online" else "Offline"
-            charger = Charger(
-                station_id=station.id,
-                charger_code=f"{prefix}-{str(i).zfill(2)}",
-                charger_type=profile["type"],
-                connector_type=profile["connector"],
-                rated_power_kw=Decimal(str(profile["power"])),
-                voltage=Decimal(str(profile["voltage"])),
-                current_amp=Decimal("0.0"),
-                power_factor=Decimal("0.94"),
-                status=status_val,
-            )
-            db.add(charger)
-
+        db.add(new_station)
         db.commit()
-        db.refresh(station)
-        return StationService._enrich_station(station, db)
+        db.refresh(new_station)
+
+        # Create baseline station setting
+        st_setting = StationSetting(
+            station_id=new_station.id,
+            station_address=new_station.address or "",
+            tariff_per_kwh=Decimal(str(settings.DEFAULT_TARIFF)),
+            electricity_cost_per_kwh=Decimal("8.5"),
+            currency="INR",
+            energy_unit="kWh",
+            power_unit="kW",
+            demo_mode_active=True,
+            auto_refresh_seconds=15,
+        )
+        db.add(st_setting)
+        db.commit()
+
+        return StationService.compute_station_metrics(new_station, db)
 
     @staticmethod
-    def update_station(
-        db: Session, identifier: str, data: StationUpdate
-    ) -> dict:
+    def update_station(db: Session, identifier: str, data: StationUpdate) -> dict:
         station = StationService.get_station_by_id_or_code(db, identifier)
         if not station:
             raise HTTPException(
@@ -212,77 +251,146 @@ class StationService:
                 detail=f"Station '{identifier}' not found.",
             )
 
-        if data.station_name is not None:
-            station.station_name = data.station_name.strip()
-        if data.description is not None:
-            station.description = data.description
+        update_dict = data.model_dump(exclude_unset=True)
+        for key, val in update_dict.items():
+            if hasattr(station, key) and val is not None:
+                setattr(station, key, val)
+
+        db.commit()
+        db.refresh(station)
+
+        # Also update station setting address if modified
         if data.address is not None:
-            station.address = data.address
-        if data.city is not None:
-            station.city = data.city
-        if data.state is not None:
-            station.state = data.state
-        if data.postal_code is not None:
-            station.postal_code = data.postal_code
-        if data.latitude is not None:
-            station.latitude = data.latitude
-        if data.longitude is not None:
-            station.longitude = data.longitude
-        if data.status is not None:
-            station.status = data.status
+            setting = db.scalar(select(StationSetting).where(StationSetting.station_id == station.id))
+            if setting:
+                setting.station_address = data.address
+                db.commit()
 
-        # Synchronize charger statuses if station goes offline or faulted
-        if data.status in ["Offline", "offline"]:
-            chargers = db.scalars(select(Charger).where(Charger.station_id == station.id)).all()
-            for ch in chargers:
-                ch.status = "Offline"
-                ch.current_amp = Decimal("0.0")
-
-        # Handle chargers count expansion or reduction if specified
-        if data.chargers_count is not None:
-            current_chargers = db.scalars(
-                select(Charger).where(Charger.station_id == station.id).order_by(Charger.id)
-            ).all()
-            diff = data.chargers_count - len(current_chargers)
-            if diff > 0:
-                prefix = station.station_code.replace("EV-", "CH-")
-                start_idx = len(current_chargers) + 1
-                for i in range(start_idx, start_idx + diff):
-                    profile = CHARGER_PROFILES[(i - 1 + len(station.station_code)) % len(CHARGER_PROFILES)]
-                    charger = Charger(
-                        station_id=station.id,
-                        charger_code=f"{prefix}-{str(i).zfill(2)}",
-                        charger_type=profile["type"],
-                        connector_type=profile["connector"],
-                        rated_power_kw=Decimal(str(profile["power"])),
-                        voltage=Decimal(str(profile["voltage"])),
-                        current_amp=Decimal("0.0"),
-                        power_factor=Decimal("0.94"),
-                        status="Available" if station.status == "Online" else "Offline",
-                    )
-                    db.add(charger)
-            elif diff < 0:
-                # Remove from the end, ensuring not charging
-                for ch in reversed(current_chargers[data.chargers_count:]):
-                    if ch.status.lower() == "charging":
-                        raise HTTPException(
-                            status_code=status.HTTP_400_BAD_REQUEST,
-                            detail=f"Charger '{ch.charger_code}' is actively charging and cannot be removed.",
-                        )
-                    db.delete(ch)
-
-        db.commit()
-        db.refresh(station)
-        return StationService._enrich_station(station, db)
+        return StationService.compute_station_metrics(station, db)
 
     @staticmethod
-    def delete_station(db: Session, identifier: str) -> bool:
+    def delete_station(db: Session, identifier: str) -> dict:
         station = StationService.get_station_by_id_or_code(db, identifier)
         if not station:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Station '{identifier}' not found.",
             )
+
+        # Safeguard: prevent deleting Prabhu's Grid if it's the sole station
+        total_stations = db.scalar(select(func.count(Station.id)))
+        if total_stations <= 1:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot delete the only remaining station in EVanta OS.",
+            )
+
+        # Safeguard: check active sessions
+        active_sessions = db.scalar(
+            select(func.count(ChargingSession.id))
+            .join(Charger, ChargingSession.charger_id == Charger.id)
+            .where(Charger.station_id == station.id)
+            .where(ChargingSession.status == "Ongoing")
+        )
+        if active_sessions > 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Cannot delete station while {active_sessions} charging session(s) are actively ongoing.",
+            )
+
+        st_code = station.station_code
         db.delete(station)
         db.commit()
-        return True
+
+        return {
+            "status": "success",
+            "message": f"Station '{st_code}' deleted successfully.",
+        }
+
+    @staticmethod
+    def get_settings(db: Session, station_id_or_code: Optional[str] = None) -> dict:
+        station = (
+            StationService.get_station_by_id_or_code(db, station_id_or_code)
+            if station_id_or_code
+            else StationService.get_prabhus_grid_station(db)
+        )
+        setting = db.scalar(select(StationSetting).where(StationSetting.station_id == station.id))
+        if not setting:
+            setting = StationSetting(
+                station_id=station.id,
+                station_address=station.address or settings.DEFAULT_ADDRESS,
+                tariff_per_kwh=Decimal(str(settings.DEFAULT_TARIFF)),
+                electricity_cost_per_kwh=Decimal("8.5"),
+                currency="INR",
+                energy_unit="kWh",
+                power_unit="kW",
+                demo_mode_active=True,
+                auto_refresh_seconds=15,
+                notify_operational_alerts=True,
+                notify_session_updates=True,
+            )
+            db.add(setting)
+            db.commit()
+            db.refresh(setting)
+
+        return {
+            "id": setting.id,
+            "station_id": setting.station_id,
+            "station_address": setting.station_address,
+            "tariff_per_kwh": float(setting.tariff_per_kwh),
+            "electricity_cost_per_kwh": float(setting.electricity_cost_per_kwh),
+            "currency": setting.currency,
+            "energy_unit": setting.energy_unit,
+            "power_unit": setting.power_unit,
+            "demo_mode_active": setting.demo_mode_active,
+            "auto_refresh_seconds": setting.auto_refresh_seconds,
+            "notify_operational_alerts": setting.notify_operational_alerts,
+            "notify_session_updates": setting.notify_session_updates,
+            "data_source": settings.DATA_SOURCE_LABEL,
+            "disclaimer": "DEMO MODE — SIMULATED DATA — NOT LIVE STATION TELEMETRY",
+            "created_at": setting.created_at,
+            "updated_at": setting.updated_at,
+        }
+
+    @staticmethod
+    def update_settings(db: Session, update_data: dict, station_id_or_code: Optional[str] = None) -> dict:
+        station = (
+            StationService.get_station_by_id_or_code(db, station_id_or_code)
+            if station_id_or_code
+            else StationService.get_prabhus_grid_station(db)
+        )
+        setting = db.scalar(select(StationSetting).where(StationSetting.station_id == station.id))
+        if not setting:
+            setting = StationSetting(station_id=station.id)
+            db.add(setting)
+
+        if "station_address" in update_data and update_data["station_address"] is not None:
+            setting.station_address = update_data["station_address"]
+            station.address = update_data["station_address"]
+
+        if "tariff_per_kwh" in update_data and update_data["tariff_per_kwh"] is not None:
+            setting.tariff_per_kwh = Decimal(str(update_data["tariff_per_kwh"]))
+
+        if "electricity_cost_per_kwh" in update_data and update_data["electricity_cost_per_kwh"] is not None:
+            setting.electricity_cost_per_kwh = Decimal(str(update_data["electricity_cost_per_kwh"]))
+
+        if "auto_refresh_seconds" in update_data and update_data["auto_refresh_seconds"] is not None:
+            setting.auto_refresh_seconds = int(update_data["auto_refresh_seconds"])
+
+        if "demo_mode_active" in update_data and update_data["demo_mode_active"] is not None:
+            setting.demo_mode_active = bool(update_data["demo_mode_active"])
+
+        db.commit()
+        db.refresh(setting)
+        return StationService.get_settings(db, station_id_or_code)
+
+    @staticmethod
+    def reset_demo_data(db: Session) -> dict:
+        seed_database(force_reset=True)
+        return {
+            "status": "success",
+            "message": "EVanta OS station demo data has been reset to baseline.",
+            "station": settings.STATION_NAME,
+            "data_source": settings.DATA_SOURCE_LABEL,
+            "disclaimer": "DEMO MODE — SIMULATED DATA — NOT LIVE STATION TELEMETRY",
+        }

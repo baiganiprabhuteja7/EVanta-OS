@@ -3,14 +3,16 @@ from decimal import Decimal
 from typing import List, Optional
 import uuid
 from fastapi import HTTPException, status
-from sqlalchemy import func, or_, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.models.charger import Charger
 from app.models.charging_session import ChargingSession
+from app.models.meter_reading import MeterReading
 from app.models.payment import Payment
+from app.models.setting import StationSetting
 from app.models.station import Station
-from app.models.user import User
 from app.schemas.charging_session import SessionComplete, SessionCreate
 
 
@@ -18,16 +20,18 @@ class SessionService:
     @staticmethod
     def _enrich_session(session: ChargingSession, db: Session) -> dict:
         charger = db.scalar(select(Charger).where(Charger.id == session.charger_id))
-        station = None
-        if charger:
-            station = db.scalar(select(Station).where(Station.id == charger.station_id))
-
-        duration_min = round(session.duration_seconds / 60)
+        station = db.scalar(select(Station).where(Station.id == charger.station_id)) if charger else None
+        duration_min = max(1, round(session.duration_seconds / 60))
 
         return {
             "id": session.id,
-            "session_code": session.session_code or f"SES-{session.id:04d}",
+            "session_code": session.session_code or f"SES-PG-{session.id:04d}",
+            "station_id": station.id if station else None,
+            "station_name": station.station_name if station else "Evanta Station",
             "charger_id": session.charger_id,
+            "charger_code": charger.charger_code if charger else "Unknown",
+            "charger_type": charger.charger_type if charger else "AC",
+            "connector_type": charger.connector_type if charger else "Type 2",
             "user_id": session.user_id,
             "start_time": session.start_time,
             "end_time": session.end_time,
@@ -38,41 +42,34 @@ class SessionService:
             "status": session.status,
             "unit_price": float(session.unit_price),
             "total_amount": float(session.total_amount),
+            "data_source": settings.DATA_SOURCE_LABEL,
+            "disclaimer": "SIMULATED SESSION RECORD",
             "created_at": session.created_at,
             "updated_at": session.updated_at,
-            "station_code": station.station_code if station else "Unknown",
-            "station_name": station.station_name if station else "Unknown Station",
-            "charger_code": charger.charger_code if charger else "Unknown",
-            "charger_type": charger.charger_type if charger else "AC",
         }
 
     @staticmethod
     def get_sessions(
         db: Session,
-        station_id: Optional[str] = None,
+        station_id: Optional[int] = None,
         charger_type: Optional[str] = None,
         status_filter: Optional[str] = None,
         search: Optional[str] = None,
-        from_date: Optional[str] = None,
-        to_date: Optional[str] = None,
         skip: int = 0,
         limit: int = 100,
     ) -> List[dict]:
-        query = select(ChargingSession).order_by(ChargingSession.start_time.desc())
+        query = select(ChargingSession).join(Charger, ChargingSession.charger_id == Charger.id).order_by(ChargingSession.start_time.desc())
 
-        if status_filter and status_filter != "All statuses":
+        if station_id:
+            query = query.where(Charger.station_id == station_id)
+
+        if status_filter and status_filter.lower() not in ["all statuses", "all"]:
             query = query.where(ChargingSession.status.ilike(status_filter))
 
         sessions = db.scalars(query).all()
         enriched = [SessionService._enrich_session(s, db) for s in sessions]
 
-        if station_id and station_id != "All stations":
-            enriched = [
-                s for s in enriched
-                if s["station_code"].lower() == station_id.lower() or s["station_name"].lower() == station_id.lower()
-            ]
-
-        if charger_type and charger_type != "All types":
+        if charger_type and charger_type.lower() not in ["all types", "all"]:
             enriched = [s for s in enriched if s["charger_type"].lower() == charger_type.lower()]
 
         if search:
@@ -80,88 +77,76 @@ class SessionService:
             enriched = [
                 s for s in enriched
                 if s_low in s["session_code"].lower()
-                or s_low in s["station_name"].lower()
                 or s_low in s["charger_code"].lower()
+                or (s.get("station_name") and s_low in s["station_name"].lower())
             ]
-
-        if from_date:
-            try:
-                from_dt = datetime.fromisoformat(from_date).replace(tzinfo=timezone.utc)
-                enriched = [s for s in enriched if s["start_time"] >= from_dt]
-            except Exception:
-                pass
-
-        if to_date:
-            try:
-                to_dt = datetime.fromisoformat(to_date).replace(tzinfo=timezone.utc)
-                enriched = [s for s in enriched if s["start_time"] <= to_dt]
-            except Exception:
-                pass
 
         return enriched[skip : skip + limit]
 
     @staticmethod
     def get_session_by_id_or_code(db: Session, identifier: str) -> Optional[ChargingSession]:
-        if identifier.isdigit():
-            session = db.scalar(select(ChargingSession).where(ChargingSession.id == int(identifier)))
+        query = select(ChargingSession)
+        if str(identifier).isdigit():
+            session = db.scalar(query.where(ChargingSession.id == int(identifier)))
             if session:
                 return session
-        return db.scalar(select(ChargingSession).where(ChargingSession.session_code == identifier.strip()))
+
+        return db.scalar(query.where(ChargingSession.session_code == str(identifier).strip()))
 
     @staticmethod
     def start_session(
         db: Session,
-        charger_identifier: str,
-        user: Optional[User] = None,
-        unit_price: Decimal = Decimal("22.0"),
+        charger_id_or_code: str,
+        unit_price: Optional[Decimal] = None,
+        user_id: Optional[int] = None,
     ) -> dict:
-        # Find charger by integer ID or charger_code
+        # Find charger across stations or by ID
         charger = None
-        if charger_identifier.isdigit():
-            charger = db.scalar(select(Charger).where(Charger.id == int(charger_identifier)))
+        if str(charger_id_or_code).isdigit():
+            charger = db.scalar(select(Charger).where(Charger.id == int(charger_id_or_code)))
         if not charger:
-            charger = db.scalar(select(Charger).where(Charger.charger_code == charger_identifier.strip()))
+            charger = db.scalar(select(Charger).where(Charger.charger_code == str(charger_id_or_code).strip()))
 
         if not charger:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Charger '{charger_identifier}' not found.",
+                detail=f"Charger '{charger_id_or_code}' not found.",
             )
 
         if charger.status.lower() != "available":
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Charger '{charger.charger_code}' is currently {charger.status} and cannot start a session.",
+                detail=f"Charger '{charger.charger_code}' is currently '{charger.status}'. Only Available chargers can start sessions.",
             )
 
+        # Get station tariff if not passed
         station = db.scalar(select(Station).where(Station.id == charger.station_id))
-        if station and station.status.lower() != "online":
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Station '{station.station_name}' is currently {station.status}. Only Online stations can initiate sessions.",
-            )
-
-        # Generate unique session code
-        session_code = f"SES-{charger.charger_code[-6:]}-{uuid.uuid4().hex[:4].upper()}"
+        if unit_price is None or float(unit_price) <= 0:
+            setting = db.scalar(select(StationSetting).where(StationSetting.station_id == charger.station_id)) if station else None
+            unit_price = setting.tariff_per_kwh if setting else Decimal(str(settings.DEFAULT_TARIFF))
 
         # Transition charger to Charging
         charger.status = "Charging"
-        # Set realistic current based on rated power
         if charger.charger_type == "DC":
-            charger.current_amp = Decimal(str(min(200.0, float(charger.rated_power_kw) * 2.0)))
+            charger.current_amp = Decimal(str(min(180.0, float(charger.rated_power_kw) * 1.8)))
         else:
             charger.current_amp = Decimal("32.0")
+
+        now = datetime.now(timezone.utc)
+        clean_code = charger.charger_code[-3:].replace("-", "")
+        session_code = f"SES-{clean_code}-{uuid.uuid4().hex[:4].upper()}"
 
         new_session = ChargingSession(
             session_code=session_code,
             charger_id=charger.id,
-            user_id=user.id if user else None,
-            start_time=datetime.now(timezone.utc),
+            user_id=user_id,
+            start_time=now,
             status="Ongoing",
             unit_price=unit_price,
             energy_delivered_kwh=Decimal("0.0"),
             total_amount=Decimal("0.0"),
             duration_seconds=0,
+            data_source=settings.DATA_SOURCE_LABEL,
         )
         db.add(new_session)
         db.commit()
@@ -179,59 +164,76 @@ class SessionService:
         if not session:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Charging session '{identifier}' not found.",
+                detail=f"Session '{identifier}' not found.",
             )
 
         if session.status.lower() == "completed":
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="This charging session is already completed and cannot be completed again.",
+                detail="Charging session is already completed.",
             )
 
-        end_time = datetime.now(timezone.utc)
-        duration_sec = max(60, int((end_time - session.start_time).total_seconds()))
+        now = datetime.now(timezone.utc)
+        duration_sec = max(60, int((now - session.start_time).total_seconds()))
 
-        # Determine energy delivered
+        charger = db.scalar(select(Charger).where(Charger.id == session.charger_id))
         energy = Decimal("0.0")
         peak_power = None
-        if complete_data:
+
+        if complete_data and complete_data.energy_delivered_kwh is not None and float(complete_data.energy_delivered_kwh) > 0:
             energy = complete_data.energy_delivered_kwh
-            peak_power = complete_data.peak_power_kw
+            peak_power = complete_data.peak_power_kw or (charger.rated_power_kw if charger else Decimal("22.0"))
         else:
-            # Default calculated simulation based on charger power and elapsed time
-            charger = db.scalar(select(Charger).where(Charger.id == session.charger_id))
             if charger:
                 hours = duration_sec / 3600.0
-                energy = Decimal(str(round(float(charger.rated_power_kw) * hours * 0.85, 2)))
+                power_eff = float(charger.rated_power_kw) * 0.85
+                energy = Decimal(str(round(power_eff * max(0.25, hours), 2)))
                 peak_power = charger.rated_power_kw
+            else:
+                energy = Decimal("14.5")
+                peak_power = Decimal("22.0")
 
-        total_amt = round(energy * session.unit_price, 2)
+        # Business calculation: Charging revenue = Energy delivered × Applicable charging tariff
+        total_amt = round(energy * Decimal(str(session.unit_price)), 2)
 
-        session.end_time = end_time
+        session.end_time = now
         session.duration_seconds = duration_sec
         session.energy_delivered_kwh = energy
         session.peak_power_kw = peak_power
         session.total_amount = total_amt
         session.status = "Completed"
 
-        # Transition charger back to Available
-        charger = db.scalar(select(Charger).where(Charger.id == session.charger_id))
+        # Update charger total energy and return to Available
         if charger:
             charger.status = "Available"
             charger.current_amp = Decimal("0.0")
+            charger.energy_delivered_kwh = Decimal(str(round(float(charger.energy_delivered_kwh or 0) + float(energy), 2)))
 
-        # Create simulated payment record
+        # Create meter reading record
+        meter_reading = MeterReading(
+            charger_id=session.charger_id,
+            timestamp=now,
+            power_kw=Decimal(str(float(peak_power or 0))),
+            energy_kwh=energy,
+            voltage_v=charger.voltage if charger else Decimal("230.0"),
+            current_a=charger.current_amp if charger else Decimal("0.0"),
+            power_factor=charger.power_factor if charger else Decimal("0.94"),
+            data_source=settings.DATA_SOURCE_LABEL,
+        )
+        db.add(meter_reading)
+
+        # Record payment
         payment = Payment(
             charging_session_id=session.id,
             amount=total_amt,
             currency="INR",
-            payment_method="simulated_card",
+            payment_method="simulated_upi",
             status="completed",
-            transaction_reference=f"TXN-{uuid.uuid4().hex[:12].upper()}",
+            transaction_reference=f"TXN-EV-{uuid.uuid4().hex[:8].upper()}",
+            created_at=now,
         )
         db.add(payment)
 
         db.commit()
         db.refresh(session)
-
         return SessionService._enrich_session(session, db)

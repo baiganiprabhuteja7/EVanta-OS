@@ -11,14 +11,19 @@ class Station(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     station_code: Mapped[str] = mapped_column(String(50), unique=True, index=True, nullable=False)
     station_name: Mapped[str] = mapped_column(String(150), index=True, nullable=False)
+    owner_name: Mapped[str] = mapped_column(String(100), default="Prabhu", nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=True)
     address: Mapped[str] = mapped_column(String(255), nullable=True)
-    city: Mapped[str] = mapped_column(String(100), nullable=True)
-    state: Mapped[str] = mapped_column(String(100), nullable=True)
+    city: Mapped[str] = mapped_column(String(100), default="Hyderabad", nullable=False)
+    state: Mapped[str] = mapped_column(String(100), default="Telangana", nullable=False)
+    country: Mapped[str] = mapped_column(String(100), default="India", nullable=False)
     postal_code: Mapped[str] = mapped_column(String(20), nullable=True)
     latitude: Mapped[float] = mapped_column(Numeric(9, 6), nullable=True)
     longitude: Mapped[float] = mapped_column(Numeric(9, 6), nullable=True)
     status: Mapped[str] = mapped_column(String(50), default="Online", nullable=False)  # Online, Offline, Maintenance, Faulted
+    data_source: Mapped[str] = mapped_column(String(50), default="SIMULATED", nullable=False)
+    initial_investment: Mapped[float] = mapped_column(Numeric(12, 2), default=2500000.0, nullable=False)
+    monthly_fixed_cost: Mapped[float] = mapped_column(Numeric(10, 2), default=18000.0, nullable=False)
     created_by: Mapped[int] = mapped_column(
         Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
@@ -36,4 +41,7 @@ class Station(Base):
 
     # Relationships
     chargers = relationship("Charger", back_populates="station", cascade="all, delete-orphan")
+    alerts = relationship("Alert", back_populates="station", cascade="all, delete-orphan")
     creator = relationship("User", back_populates="stations")
+    expenses = relationship("StationExpense", back_populates="station", cascade="all, delete-orphan")
+    maintenance_records = relationship("MaintenanceRecord", back_populates="station", cascade="all, delete-orphan")

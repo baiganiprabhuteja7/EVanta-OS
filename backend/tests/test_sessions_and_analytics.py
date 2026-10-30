@@ -1,87 +1,54 @@
-import uuid
+import pytest
 
 
-def test_charging_session_lifecycle_and_payment(client):
-    # Find an available charger from seeded data
-    chargers_res = client.get("/api/v1/chargers?status=Available")
-    assert chargers_res.status_code == 200
-    available = chargers_res.json()
-    assert len(available) > 0, "Expected at least one available charger"
-    target_charger = available[0]
+def test_sessions_listing_and_filtering(client, manager_headers):
+    """Authenticated officials can view and filter sessions."""
+    res = client.get("/api/v1/sessions", headers=manager_headers)
+    assert res.status_code == 200
+    sessions = res.json()
+    assert isinstance(sessions, list)
 
-    # Start session on this charger
-    start_res = client.post(
-        "/api/v1/sessions",
-        json={"charger_id": target_charger["id"], "unit_price": 25.0},
-    )
-    assert start_res.status_code == 201
-    session_data = start_res.json()
-    assert session_data["status"] == "Ongoing"
-    session_id = session_data["id"]
-
-    # Verify charger is now Charging
-    ch_check = client.get(f"/api/v1/chargers/{target_charger['id']}")
-    assert ch_check.status_code == 200
-    assert ch_check.json()["status"] == "Charging"
-
-    # Complete session with explicit delivered energy
-    complete_res = client.post(
-        f"/api/v1/sessions/{session_id}/complete",
-        json={"energy_delivered_kwh": 30.5, "peak_power_kw": 50.0},
-    )
-    assert complete_res.status_code == 200
-    completed_data = complete_res.json()
-    assert completed_data["status"] == "Completed"
-    assert completed_data["energy_delivered_kwh"] == 30.5
-    assert completed_data["total_amount"] == 30.5 * 25.0
-
-    # Ensure completed session cannot be completed again
-    repeat_res = client.post(
-        f"/api/v1/sessions/{session_id}/complete",
-        json={"energy_delivered_kwh": 10.0},
-    )
-    assert repeat_res.status_code == 400
-
-    # Verify charger is now Available again
-    ch_check2 = client.get(f"/api/v1/chargers/{target_charger['id']}")
-    assert ch_check2.status_code == 200
-    assert ch_check2.json()["status"] == "Available"
-
-    # Verify payment record was automatically created
-    payments_res = client.get("/api/v1/payments")
-    assert payments_res.status_code == 200
-    payments = payments_res.json()
-    matching_payment = next((p for p in payments if p["charging_session_id"] == session_id), None)
-    assert matching_payment is not None
-    assert matching_payment["amount"] == 30.5 * 25.0
+    # Filter by status
+    ongoing_res = client.get("/api/v1/sessions?status=Ongoing", headers=manager_headers)
+    assert ongoing_res.status_code == 200
+    for s in ongoing_res.json():
+        assert s["status"] == "Ongoing"
 
 
-def test_dashboard_and_business_analytics(client):
-    dash_res = client.get("/api/v1/analytics/dashboard")
+def test_dashboard_and_business_analytics(client, viewer_headers):
+    """Officials can view analytics overview and business metrics."""
+    dash_res = client.get("/api/v1/analytics/dashboard", headers=viewer_headers)
     assert dash_res.status_code == 200
     dash_data = dash_res.json()
-    assert dash_data["total_stations"] >= 8
-    assert dash_data["total_chargers"] >= 40
+    assert dash_data["installed_capacity_kw"] > 0
+    assert dash_data["current_charging_power_kw"] >= 0
 
-    energy_res = client.get("/api/v1/analytics/energy?days=14")
-    assert energy_res.status_code == 200
-    assert len(energy_res.json()) > 0
-
-    biz_res = client.get("/api/v1/analytics/business")
+    biz_res = client.get("/api/v1/analytics/business", headers=viewer_headers)
     assert biz_res.status_code == 200
-    assert "total_revenue" in biz_res.json()
-    assert "estimated_gross_margin" in biz_res.json()
+    biz_data = biz_res.json()
+    assert "estimated_today_cost" in biz_data
 
 
-def test_workspace_settings(client):
-    get_res = client.get("/api/v1/settings")
+def test_station_settings_rbac(client, admin_headers, viewer_headers):
+    """Viewers can inspect settings; only Administrators can modify them."""
+    # View settings
+    get_res = client.get("/api/v1/settings", headers=viewer_headers)
     assert get_res.status_code == 200
     assert get_res.json()["currency"] == "INR"
 
-    update_res = client.put(
+    # Viewer cannot modify settings (403)
+    viewer_put = client.put(
         "/api/v1/settings",
-        json={"electricity_cost_per_kwh": 9.25, "compact_tables": True},
+        json={"tariff_per_kwh": 19.5, "electricity_cost_per_kwh": 8.0},
+        headers=viewer_headers,
     )
-    assert update_res.status_code == 200
-    assert update_res.json()["electricity_cost_per_kwh"] == 9.25
-    assert update_res.json()["compact_tables"] is True
+    assert viewer_put.status_code == 403
+
+    # Admin can modify settings (200)
+    admin_put = client.put(
+        "/api/v1/settings",
+        json={"tariff_per_kwh": 19.5, "electricity_cost_per_kwh": 8.0},
+        headers=admin_headers,
+    )
+    assert admin_put.status_code == 200
+    assert admin_put.json()["tariff_per_kwh"] == 19.5

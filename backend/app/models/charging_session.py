@@ -36,11 +36,12 @@ class ChargingSession(Base):
         String(50), default="Ongoing", nullable=False
     )  # Pending, Ongoing, Completed, Failed
     unit_price: Mapped[float] = mapped_column(
-        Numeric(8, 2), default=22.0, nullable=False
+        Numeric(8, 2), default=18.5, nullable=False
     )
     total_amount: Mapped[float] = mapped_column(
         Numeric(10, 2), default=0.0, nullable=False
     )
+    data_source: Mapped[str] = mapped_column(String(50), default="SIMULATED", nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),

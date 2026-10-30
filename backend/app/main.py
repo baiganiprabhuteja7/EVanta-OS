@@ -9,21 +9,24 @@ from app.db.seed import seed_database
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Ensure database initial seed is run if empty
-    seed_database()
+    # Ensure baseline database seed is run without hardcoding credentials
+    try:
+        seed_database()
+    except Exception as e:
+        print(f"[!] Warning: Initial database seed encountered an issue: {e}")
     yield
 
 
 app = FastAPI(
-    title=settings.PROJECT_NAME,
-    description="EV Charging Intelligence & Business Management Platform API",
+    title="Evanta OS API",
+    description="Evanta OS — EV Charging Station Monitoring & Management (Hyderabad, Telangana, India)",
     version=settings.VERSION,
     lifespan=lifespan,
     docs_url="/docs",
     redoc_url="/redoc",
 )
 
-# CORS Middleware for React frontend integration
+# CORS Middleware with explicit origins and credentialed request support
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins_list,
@@ -39,9 +42,11 @@ app.include_router(api_router, prefix="/api/v1")
 @app.get("/", tags=["Health"])
 def root():
     return {
-        "message": "Welcome to EVanta OS API",
+        "message": "Welcome to Evanta OS API",
+        "station": settings.STATION_NAME,
+        "location": "Hyderabad, Telangana, India",
         "status": "running",
-        "version": settings.VERSION,
+        "data_mode": "DEMO / SIMULATED",
         "docs": "/docs",
     }
 
@@ -50,6 +55,9 @@ def root():
 def health_check():
     return {
         "status": "healthy",
-        "application": "EVanta OS",
+        "application": "Evanta OS",
+        "station": settings.STATION_NAME,
+        "location": "Hyderabad, Telangana, India",
+        "data_mode": "DEMO MODE — SIMULATED DATA — NOT LIVE STATION TELEMETRY",
         "version": settings.VERSION,
     }

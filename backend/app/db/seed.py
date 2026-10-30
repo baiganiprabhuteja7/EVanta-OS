@@ -1,249 +1,290 @@
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.core.security import hash_password
-from app.db.session import SessionLocal
+from app.db.base import Base
+from app.db.session import SessionLocal, engine
+from app.models.alert import Alert
 from app.models.charger import Charger
 from app.models.charging_session import ChargingSession
+from app.models.meter_reading import MeterReading
 from app.models.payment import Payment
-from app.models.setting import WorkspaceSetting
+from app.models.setting import StationSetting
 from app.models.station import Station
 from app.models.user import User
 
-SEED_STATIONS = [
+PRABHUS_CHARGER_PROFILES = [
     {
-        "id": "EV-BLR-001",
-        "name": "Northstar Mobility Hub",
-        "city": "Bengaluru",
-        "state": "Karnataka",
-        "address": "42 Residency Road, Ashok Nagar, Bengaluru 560025",
-        "chargers": 8,
-        "active_chargers": 7,
-        "status": "Online",
+        "code": "PG-AC-01",
+        "type": "AC",
+        "connector": "Type 2",
+        "power": 7.4,
+        "voltage": 230.0,
+        "current": 0.0,
+        "power_factor": 0.95,
+        "status": "Available",
+        "energy_delivered": 142.5,
     },
     {
-        "id": "EV-HYD-002",
-        "name": "Airport Gateway",
-        "city": "Hyderabad",
-        "state": "Telangana",
-        "address": "Shamshabad Airport Access Road, Hyderabad 500409",
-        "chargers": 6,
-        "active_chargers": 6,
-        "status": "Online",
+        "code": "PG-AC-02",
+        "type": "AC",
+        "connector": "Type 2",
+        "power": 22.0,
+        "voltage": 400.0,
+        "current": 32.0,
+        "power_factor": 0.94,
+        "status": "Charging",
+        "energy_delivered": 318.0,
     },
     {
-        "id": "EV-PUN-003",
-        "name": "Tech Park Central",
-        "city": "Pune",
-        "state": "Maharashtra",
-        "address": "Plot 18, Hinjawadi Phase 2, Pune 411057",
-        "chargers": 5,
-        "active_chargers": 4,
-        "status": "Online",
+        "code": "PG-DC-01",
+        "type": "DC",
+        "connector": "CCS2",
+        "power": 60.0,
+        "voltage": 500.0,
+        "current": 105.0,
+        "power_factor": 0.98,
+        "status": "Charging",
+        "energy_delivered": 890.4,
     },
     {
-        "id": "EV-MUM-004",
-        "name": "Harbour Point",
-        "city": "Mumbai",
-        "state": "Maharashtra",
-        "address": "Eastern Freeway Service Road, Wadala, Mumbai 400037",
-        "chargers": 5,
-        "active_chargers": 0,
-        "status": "Offline",
+        "code": "PG-DC-02",
+        "type": "DC",
+        "connector": "CCS2",
+        "power": 120.0,
+        "voltage": 650.0,
+        "current": 0.0,
+        "power_factor": 0.99,
+        "status": "Available",
+        "energy_delivered": 1450.2,
     },
     {
-        "id": "EV-MAA-005",
-        "name": "Greenway Plaza",
-        "city": "Chennai",
-        "state": "Tamil Nadu",
-        "address": "OMR, Perungudi, Chennai 600096",
-        "chargers": 4,
-        "active_chargers": 2,
-        "status": "Maintenance",
+        "code": "PG-DC-03",
+        "type": "DC",
+        "connector": "CHAdeMO",
+        "power": 50.0,
+        "voltage": 400.0,
+        "current": 0.0,
+        "power_factor": 0.97,
+        "status": "Available",
+        "energy_delivered": 620.0,
     },
     {
-        "id": "EV-DEL-006",
-        "name": "Ring Road Express",
-        "city": "Delhi",
-        "state": "NCR",
-        "address": "Outer Ring Road, Pitampura, New Delhi 110034",
-        "chargers": 4,
-        "active_chargers": 3,
-        "status": "Online",
-    },
-    {
-        "id": "EV-JAI-007",
-        "name": "Pink City Charge Point",
-        "city": "Jaipur",
-        "state": "Rajasthan",
-        "address": "Tonk Road, Durgapura, Jaipur 302018",
-        "chargers": 6,
-        "active_chargers": 0,
+        "code": "PG-AC-03",
+        "type": "AC",
+        "connector": "Type 2",
+        "power": 11.0,
+        "voltage": 400.0,
+        "current": 0.0,
+        "power_factor": 0.92,
         "status": "Faulted",
-    },
-    {
-        "id": "EV-KOC-008",
-        "name": "Coastal Link Station",
-        "city": "Kochi",
-        "state": "Kerala",
-        "address": "NH 66, Edappally, Kochi 682024",
-        "chargers": 4,
-        "active_chargers": 0,
-        "status": "Faulted",
+        "energy_delivered": 85.0,
     },
 ]
 
-CHARGER_PROFILES = [
-    {"type": "AC", "connector": "Type 2", "power": 7.4, "voltage": 230, "current": 32},
-    {"type": "AC", "connector": "Type 2", "power": 22.0, "voltage": 400, "current": 34},
-    {"type": "DC", "connector": "CCS2", "power": 60.0, "voltage": 500, "current": 120},
-    {"type": "DC", "connector": "CCS2", "power": 120.0, "voltage": 650, "current": 185},
-    {"type": "DC", "connector": "CHAdeMO", "power": 50.0, "voltage": 400, "current": 125},
-]
 
-
-def seed_database():
-    """Seeds initial administrative account, stations, chargers, sessions, and settings if empty."""
-    from app.db.base import Base
-    from app.db.session import engine
-    import app.models  # ensure models are registered with Base.metadata
-
-    # Ensure tables exist
+def seed_database(force_reset: bool = False):
+    """
+    Seeds Prabhu's Grid - strictly single-station setup for Hyderabad.
+    Guarantees table existence and populates demo configuration, chargers,
+    meter readings, alerts, sessions, and settings.
+    """
+    import app.models  # ensure models are registered
     Base.metadata.create_all(bind=engine)
 
     db: Session = SessionLocal()
     try:
-        # 1. Admin user
-        admin = db.scalar(select(User).where(User.email == "admin@evanta.os"))
-        if not admin:
-            admin = User(
-                full_name="EVanta Admin",
-                email="admin@evanta.os",
-                password_hash=hash_password("Admin@123456"),
-                role="admin",
-                is_active=True,
-            )
-            db.add(admin)
+        now = datetime.now(timezone.utc)
+
+        # 1. Administrator reference (never auto-seed hardcoded credentials)
+        admin = db.scalar(select(User).where(User.role == "admin").limit(1))
+        admin_id = admin.id if admin else None
+
+        # If force reset requested or old multi-station data exists, clean up
+        existing_stations = db.scalars(select(Station)).all()
+        has_unrelated_stations = any(s.station_code != settings.STATION_CODE for s in existing_stations)
+
+        if force_reset or has_unrelated_stations:
+            # Clean up all old stations and dependent rows
+            db.execute(delete(MeterReading))
+            db.execute(delete(Alert))
+            db.execute(delete(Payment))
+            db.execute(delete(ChargingSession))
+            db.execute(delete(Charger))
+            db.execute(delete(StationSetting))
+            db.execute(delete(Station))
             db.flush()
 
-        # 2. Workspace settings
-        setting = db.scalar(select(WorkspaceSetting).order_by(WorkspaceSetting.id))
+        # 2. Prabhu's Grid Station (Single Station Scope)
+        station = db.scalar(select(Station).where(Station.station_code == settings.STATION_CODE))
+        if not station:
+            station = Station(
+                station_code=settings.STATION_CODE,
+                station_name=settings.STATION_NAME,
+                owner_name=settings.STATION_OWNER,
+                description="Personal EV charging station management and monitoring prototype in Hyderabad.",
+                address=settings.DEFAULT_ADDRESS,
+                city=settings.STATION_CITY,
+                state=settings.STATION_STATE,
+                country=settings.STATION_COUNTRY,
+                postal_code="500081",
+                latitude=Decimal("17.448293"),
+                longitude=Decimal("78.374187"),
+                status="Online",
+                data_source="SIMULATED",
+                created_by=admin_id,
+            )
+            db.add(station)
+            db.flush()
+
+        # 3. Station Settings
+        setting = db.scalar(select(StationSetting).where(StationSetting.station_id == station.id))
         if not setting:
-            setting = WorkspaceSetting(
-                user_id=admin.id,
+            setting = StationSetting(
+                station_id=station.id,
+                station_address=station.address or settings.DEFAULT_ADDRESS,
+                tariff_per_kwh=Decimal(str(settings.DEFAULT_TARIFF)),
+                electricity_cost_per_kwh=Decimal("7.5"),
                 currency="INR",
                 energy_unit="kWh",
-                electricity_cost_per_kwh=Decimal("8.5"),
-                initial_investment=Decimal("12500000.0"),
-                monthly_operating_costs=Decimal("185000.0"),
-                compact_tables=False,
-                reduce_motion=False,
+                power_unit="kW",
+                demo_mode_active=True,
+                auto_refresh_seconds=15,
                 notify_operational_alerts=True,
                 notify_session_updates=True,
-                notify_weekly_summary=False,
             )
             db.add(setting)
+            db.flush()
 
-        # 3. Stations & Chargers
-        station_count = db.scalar(select(Station.id).limit(1))
-        if station_count is None:
-            now = datetime.now(timezone.utc)
-            all_chargers: list[Charger] = []
+        # 4. Configured Chargers for Prabhu's Grid
+        existing_chargers = db.scalars(select(Charger).where(Charger.station_id == station.id)).all()
+        charger_map = {c.charger_code: c for c in existing_chargers}
 
-            for st_data in SEED_STATIONS:
-                station = Station(
-                    station_code=st_data["id"],
-                    station_name=st_data["name"],
-                    city=st_data["city"],
-                    state=st_data["state"],
-                    address=st_data["address"],
-                    status=st_data["status"],
-                    created_by=admin.id,
+        created_chargers = []
+        for profile in PRABHUS_CHARGER_PROFILES:
+            code = profile["code"]
+            if code not in charger_map:
+                ch = Charger(
+                    station_id=station.id,
+                    charger_code=code,
+                    charger_type=profile["type"],
+                    connector_type=profile["connector"],
+                    rated_power_kw=Decimal(str(profile["power"])),
+                    voltage=Decimal(str(profile["voltage"])),
+                    current_amp=Decimal(str(profile["current"])),
+                    power_factor=Decimal(str(profile["power_factor"])),
+                    energy_delivered_kwh=Decimal(str(profile["energy_delivered"])),
+                    status=profile["status"],
+                    data_source="SIMULATED",
                 )
-                db.add(station)
+                db.add(ch)
                 db.flush()
+                created_chargers.append(ch)
+            else:
+                created_chargers.append(charger_map[code])
 
-                prefix = st_data["id"].replace("EV-", "CH-")
-                num_chargers = st_data["chargers"]
-                active_chargers = st_data["active_chargers"]
+        # 5. Timestamped Meter Readings (for 24h trend charts)
+        reading_count = db.scalar(select(MeterReading.id).limit(1))
+        if reading_count is None:
+            # Generate deterministic 24-hour hourly telemetry samples
+            for h in range(24, 0, -1):
+                sample_time = now - timedelta(hours=h)
+                hour_of_day = sample_time.hour
 
-                for i in range(1, num_chargers + 1):
-                    profile = CHARGER_PROFILES[(i - 1 + len(st_data["id"])) % len(CHARGER_PROFILES)]
-                    status_val = "Available"
-                    if station.status == "Offline":
-                        status_val = "Offline"
-                    elif station.status in ["Faulted", "Maintenance"]:
-                        status_val = "Faulted" if i == 1 else "Offline"
-                    elif i <= active_chargers:
-                        status_val = "Charging"
+                for ch in created_chargers:
+                    # Realistic day-night curve peaking between 10:00 and 19:00
+                    active_prob = 0.8 if 9 <= hour_of_day <= 20 else 0.25
+                    rated = float(ch.rated_power_kw)
 
-                    is_charging = status_val == "Charging"
-                    current_amp = Decimal(str(profile["current"])) if is_charging else Decimal("0.0")
+                    if ch.status == "Faulted":
+                        p_kw = 0.0
+                        curr = 0.0
+                    elif (h % 3 == 0) and active_prob > 0.5:
+                        p_kw = round(rated * (0.65 + ((h * 7) % 30) / 100.0), 2)
+                        p_kw = min(p_kw, rated)
+                        curr = round((p_kw * 1000) / float(ch.voltage or 230), 1)
+                    else:
+                        p_kw = 0.0
+                        curr = 0.0
 
-                    charger = Charger(
-                        station_id=station.id,
-                        charger_code=f"{prefix}-{str(i).zfill(2)}",
-                        charger_type=profile["type"],
-                        connector_type=profile["connector"],
-                        rated_power_kw=Decimal(str(profile["power"])),
-                        voltage=Decimal(str(profile["voltage"])),
-                        current_amp=current_amp,
-                        power_factor=Decimal("0.94"),
-                        status=status_val,
+                    # Non-decreasing cumulative energy calculation
+                    energy_cum = round(float(ch.energy_delivered_kwh) - (h * 1.8), 2)
+                    energy_cum = max(10.0, energy_cum)
+
+                    mr = MeterReading(
+                        charger_id=ch.id,
+                        timestamp=sample_time,
+                        power_kw=Decimal(str(p_kw)),
+                        energy_kwh=Decimal(str(energy_cum)),
+                        voltage_v=ch.voltage,
+                        current_a=Decimal(str(curr)),
+                        power_factor=ch.power_factor,
+                        data_source="SIMULATED",
                     )
-                    db.add(charger)
-                    db.flush()
-                    all_chargers.append(charger)
+                    db.add(mr)
 
-            # 4. Initial Charging Sessions
-            # Active/ongoing sessions for currently charging chargers
-            ongoing_chargers = [c for c in all_chargers if c.status == "Charging"]
-            for idx, ch in enumerate(ongoing_chargers):
-                duration_min = 18 + ((idx * 13) % 62)
-                start_dt = now - timedelta(minutes=duration_min)
-                energy = Decimal(str(round(5.5 + ((idx * 19) % 147) / 10.0, 1)))
-                rate = Decimal(str(19 + (idx % 6)))
+        # 6. Active and Historical Charging Sessions for Prabhu's Grid
+        sess_count = db.scalar(select(ChargingSession.id).limit(1))
+        if sess_count is None:
+            # Active ongoing sessions for currently charging chargers
+            charging_chargers = [c for c in created_chargers if c.status == "Charging"]
+            for idx, ch in enumerate(charging_chargers):
+                dur_min = 28 + (idx * 15)
+                start_dt = now - timedelta(minutes=dur_min)
+                power_rate = min(float(ch.rated_power_kw), 50.0 if ch.charger_type == "DC" else 11.0)
+                energy_delivered = round(power_rate * (dur_min / 60.0) * 0.9, 1)
+                tariff = Decimal(str(settings.DEFAULT_TARIFF))
+
                 sess = ChargingSession(
-                    session_code=f"SES-{ch.charger_code[-6:]}-{idx + 1:02d}",
+                    session_code=f"SES-PG-{ch.charger_code[-2:]}-{idx + 1:02d}",
                     charger_id=ch.id,
-                    user_id=admin.id,
+                    user_id=admin_id,
                     start_time=start_dt,
-                    duration_seconds=duration_min * 60,
-                    energy_delivered_kwh=energy,
-                    peak_power_kw=ch.rated_power_kw,
-                    unit_price=rate,
-                    total_amount=round(energy * rate, 2),
+                    end_time=None,
+                    duration_seconds=dur_min * 60,
+                    energy_delivered_kwh=Decimal(str(energy_delivered)),
+                    peak_power_kw=Decimal(str(power_rate)),
+                    unit_price=tariff,
+                    total_amount=round(Decimal(str(energy_delivered)) * tariff, 2),
                     status="Ongoing",
+                    data_source="SIMULATED",
                 )
                 db.add(sess)
 
             # Historical completed sessions
-            for idx in range(36):
-                ch = all_chargers[(idx * 7 + 3) % len(all_chargers)]
-                duration_min = 25 + ((idx * 17) % 96)
-                days_ago = (idx * 5) % 30
-                start_dt = now - timedelta(days=days_ago, hours=(idx % 12), minutes=duration_min)
-                end_dt = start_dt + timedelta(minutes=duration_min)
-                is_failed = idx % 13 == 0
-                status_val = "Failed" if is_failed else "Completed"
-                energy = Decimal("0.0") if is_failed else Decimal(str(round(12.0 + ((idx * 23) % 580) / 10.0, 1)))
-                rate = Decimal(str(19 + ((idx + 2) % 6)))
-                total_amt = Decimal("0.0") if is_failed else round(energy * rate, 2)
+            for i in range(25):
+                ch = created_chargers[i % len(created_chargers)]
+                if ch.status == "Faulted" and i % 3 != 0:
+                    continue
+
+                dur_min = 20 + ((i * 13) % 75)
+                days_ago = (i * 2) % 15
+                start_dt = now - timedelta(days=days_ago, hours=(i % 14) + 1, minutes=dur_min)
+                end_dt = start_dt + timedelta(minutes=dur_min)
+                is_failed = (i == 7)
+                status_str = "Failed" if is_failed else "Completed"
+                
+                power_rate = min(float(ch.rated_power_kw), 45.0 if ch.charger_type == "DC" else 9.5)
+                energy_val = Decimal("0.0") if is_failed else Decimal(str(round(power_rate * (dur_min / 60.0) * 0.88, 1)))
+                tariff = Decimal(str(settings.DEFAULT_TARIFF))
+                amt = Decimal("0.0") if is_failed else round(energy_val * tariff, 2)
 
                 sess = ChargingSession(
-                    session_code=f"SES-HIST-{idx + 1:04d}",
+                    session_code=f"SES-PG-HIST-{i + 1:03d}",
                     charger_id=ch.id,
-                    user_id=admin.id,
+                    user_id=admin_id,
                     start_time=start_dt,
                     end_time=end_dt,
-                    duration_seconds=duration_min * 60,
-                    energy_delivered_kwh=energy,
-                    peak_power_kw=ch.rated_power_kw,
-                    unit_price=rate,
-                    total_amount=total_amt,
-                    status=status_val,
+                    duration_seconds=dur_min * 60,
+                    energy_delivered_kwh=energy_val,
+                    peak_power_kw=Decimal(str(power_rate)),
+                    unit_price=tariff,
+                    total_amount=amt,
+                    status=status_str,
+                    data_source="SIMULATED",
                 )
                 db.add(sess)
                 db.flush()
@@ -251,23 +292,53 @@ def seed_database():
                 if not is_failed:
                     payment = Payment(
                         charging_session_id=sess.id,
-                        amount=total_amt,
+                        amount=amt,
                         currency="INR",
-                        payment_method="simulated_card",
+                        payment_method="simulated_upi",
                         status="completed",
-                        transaction_reference=f"TXN-HIST-{idx + 1:04d}",
+                        transaction_reference=f"TXN-PG-{i + 1:04d}",
                         created_at=end_dt,
                     )
                     db.add(payment)
 
+        # 7. Station Alerts
+        alert_count = db.scalar(select(Alert.id).limit(1))
+        if alert_count is None:
+            faulted_charger = next((c for c in created_chargers if c.status == "Faulted"), None)
+            alerts_to_seed = [
+                Alert(
+                    station_id=station.id,
+                    charger_id=faulted_charger.id if faulted_charger else None,
+                    severity="warning",
+                    code="CHARGER_GROUND_FAULT",
+                    title="Charger PG-AC-03 Insulation Fault",
+                    message="Ground fault detected on PG-AC-03 connector. Charger isolated automatically for inspection.",
+                    is_active=True,
+                    data_source="SIMULATED",
+                ),
+                Alert(
+                    station_id=station.id,
+                    charger_id=None,
+                    severity="info",
+                    code="STATION_ONLINE",
+                    title="Prabhu's Grid Systems Operational",
+                    message="Station telemetry feed active in simulated prototype mode.",
+                    is_active=True,
+                    data_source="SIMULATED",
+                ),
+            ]
+            for al in alerts_to_seed:
+                db.add(al)
+
         db.commit()
     except Exception as e:
         db.rollback()
-        print(f"Error seeding database: {e}")
+        print(f"Error seeding Prabhu's Grid: {e}")
+        raise e
     finally:
         db.close()
 
 
 if __name__ == "__main__":
-    seed_database()
-    print("Database seeding completed.")
+    seed_database(force_reset=True)
+    print("Prabhu's Grid database seeded successfully.")

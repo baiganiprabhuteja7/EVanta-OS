@@ -5,9 +5,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.api.dependencies import get_db
+from app.api.dependencies import get_current_user, require_manager_or_admin, get_db
 from app.models.charging_session import ChargingSession
 from app.models.payment import Payment
+from app.models.user import User
 from app.schemas.payment import PaymentCreate, PaymentResponse
 
 router = APIRouter(prefix="/payments", tags=["Payments"])
@@ -31,6 +32,7 @@ def _payment_to_response(payment: Payment) -> PaymentResponse:
 def list_payments(
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=500),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """Retrieve simulated payment records."""
@@ -41,7 +43,11 @@ def list_payments(
 
 
 @router.get("/{payment_id}", response_model=PaymentResponse)
-def get_payment(payment_id: int, db: Session = Depends(get_db)):
+def get_payment(
+    payment_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     """Retrieve details of a specific payment transaction."""
     payment = db.scalar(select(Payment).where(Payment.id == payment_id))
     if not payment:
@@ -55,12 +61,10 @@ def get_payment(payment_id: int, db: Session = Depends(get_db)):
 @router.post("/simulate", response_model=PaymentResponse, status_code=status.HTTP_201_CREATED)
 def simulate_payment(
     payment_in: PaymentCreate,
+    current_operator: User = Depends(require_manager_or_admin),
     db: Session = Depends(get_db),
 ):
-    """
-    Simulate a payment transaction for a charging session.
-    (Clearly identified simulated payment flow).
-    """
+    """Simulate a payment transaction for a charging session (Station Manager or Administrator)."""
     session = db.scalar(
         select(ChargingSession).where(ChargingSession.id == payment_in.charging_session_id)
     )
