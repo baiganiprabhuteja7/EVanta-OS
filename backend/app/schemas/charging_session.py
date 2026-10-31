@@ -19,6 +19,8 @@ class SessionComplete(BaseModel):
 class SessionResponse(BaseModel):
     id: int
     session_code: str
+    station_id: Optional[int] = None
+    station_name: Optional[str] = None
     charger_id: int
     charger_code: Optional[str] = None
     charger_type: Optional[str] = None
